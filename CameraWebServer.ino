@@ -1,26 +1,67 @@
 #include "esp_camera.h"
 #include <WiFi.h>
-#include "soc/soc.h"
-#include "soc/rtc_cntl_reg.h"
+#include <ESP32Servo.h>
+#include <HTTPClient.h>
 
-#define CAMERA_MODEL_AI_THINKER // Has PSRAM
+// Ultrasonic Sensor Pins
+#define TRIG_PIN 12
+#define ECHO_PIN 13
 
-#include "camera_pins.h"
+#define PWDN_GPIO_NUM     32
+#define RESET_GPIO_NUM    -1
+#define XCLK_GPIO_NUM      0
+#define SIOD_GPIO_NUM     26
+#define SIOC_GPIO_NUM     27
+#define Y9_GPIO_NUM       35
+#define Y8_GPIO_NUM       34
+#define Y7_GPIO_NUM       39
+#define Y6_GPIO_NUM       36
+#define Y5_GPIO_NUM       21
+#define Y4_GPIO_NUM       19
+#define Y3_GPIO_NUM       18
+#define Y2_GPIO_NUM        5
+#define VSYNC_GPIO_NUM    25
+#define HREF_GPIO_NUM     23
+#define PCLK_GPIO_NUM     22
 
-// ===========================
-// Enter WiFi credentials
-// ===========================
-const char *ssid = "Usaamahwifi";
-const char *password = "Usaamah2";
+const char* ssid = "Usaamahwifi";
+const char* password = "Usaamah2";
+const char* apiKey = "UE2GBZ0DR1QNFS0G"; // Replace with your ThingSpeak API Key
+const char* server = "https://api.thingspeak.com/update?api_key=UE2GBZ0DR1QNFS0G&field1=0";
 
-void startCameraServer();
-void setupLedFlash(int pin);
+WiFiServer httpServer(80);
+WiFiClient live_client;
 
-void setup() {
-  Serial.begin(115200);
-  Serial.setDebugOutput(true);
-  Serial.println();
+// Servo control
+Servo myServo;
+int servoPos = 90;  // Default servo position
 
+// Ultrasonic Sensor Variables
+int objectCount = 0;
+unsigned long lastSendTime = 0;
+
+String index_html = "<meta charset=\"utf-8\"/>\n" \
+                    "<style>\n" \
+                    "#content {\n" \
+                    "display: flex;\n" \
+                    "flex-direction: column;\n" \
+                    "justify-content: center;\n" \
+                    "align-items: center;\n" \
+                    "text-align: center;\n" \
+                    "min-height: 100vh;}\n" \
+                    "</style>\n" \
+                    "<body bgcolor=\"#000000\"><div id=\"content\"><h2 style=\"color:#ffffff\">CiferTech LIVE</h2><img src=\"video\"><br>" \
+                    "<button onclick=\"moveServo('left')\">Move Left</button><br>" \
+                    "<button onclick=\"moveServo('right')\">Move Right</button></div>" \
+                    "<script>\n" \
+                    "function moveServo(direction) {\n" \
+                    "  var xhr = new XMLHttpRequest();\n" \
+                    "  xhr.open('GET', '/' + direction, true);\n" \
+                    "  xhr.send();\n" \
+                    "}\n" \
+                    "</script></body>";
+
+void configCamera() {
   camera_config_t config;
   config.ledc_channel = LEDC_CHANNEL_0;
   config.ledc_timer = LEDC_TIMER_0;
@@ -36,45 +77,16 @@ void setup() {
   config.pin_pclk = PCLK_GPIO_NUM;
   config.pin_vsync = VSYNC_GPIO_NUM;
   config.pin_href = HREF_GPIO_NUM;
-  config.pin_sccb_sda = SIOD_GPIO_NUM;
-  config.pin_sccb_scl = SIOC_GPIO_NUM;
+  config.pin_sscb_sda = SIOD_GPIO_NUM;
+  config.pin_sscb_scl = SIOC_GPIO_NUM;
   config.pin_pwdn = PWDN_GPIO_NUM;
   config.pin_reset = RESET_GPIO_NUM;
   config.xclk_freq_hz = 20000000;
-  config.frame_size = FRAMESIZE_UXGA;
-  config.pixel_format = PIXFORMAT_JPEG;  // for streaming
-  //config.pixel_format = PIXFORMAT_RGB565; // for face detection/recognition
-  config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
-  config.fb_location = CAMERA_FB_IN_PSRAM;
-  config.jpeg_quality = 12;
+  config.pixel_format = PIXFORMAT_JPEG;
+  config.frame_size = FRAMESIZE_QVGA;
+  config.jpeg_quality = 9;
   config.fb_count = 1;
 
-  // if PSRAM IC present, init with UXGA resolution and higher JPEG quality
-  //                      for larger pre-allocated frame buffer.
-  if (config.pixel_format == PIXFORMAT_JPEG) {
-    if (psramFound()) {
-      config.jpeg_quality = 10;
-      config.fb_count = 2;
-      config.grab_mode = CAMERA_GRAB_LATEST;
-    } else {
-      // Limit the frame size when PSRAM is not available
-      config.frame_size = FRAMESIZE_SVGA;
-      config.fb_location = CAMERA_FB_IN_DRAM;
-    }
-  } else {
-    // Best option for face detection/recognition
-    config.frame_size = FRAMESIZE_240X240;
-#if CONFIG_IDF_TARGET_ESP32S3
-    config.fb_count = 2;
-#endif
-  }
-
-#if defined(CAMERA_MODEL_ESP_EYE)
-  pinMode(13, INPUT_PULLUP);
-  pinMode(14, INPUT_PULLUP);
-#endif
-
-  // camera init
   esp_err_t err = esp_camera_init(&config);
   if (err != ESP_OK) {
     Serial.printf("Camera init failed with error 0x%x", err);
@@ -82,49 +94,143 @@ void setup() {
   }
 
   sensor_t *s = esp_camera_sensor_get();
-  // initial sensors are flipped vertically and colors are a bit saturated
-  if (s->id.PID == OV3660_PID) {
-    s->set_vflip(s, 1);        // flip it back
-    s->set_brightness(s, 1);   // up the brightness just a bit
-    s->set_saturation(s, -2);  // lower the saturation
+  if (s) {
+    s->set_vflip(s, 1); 
+    s->set_hmirror(s, 1); 
+  } else {
+    Serial.println("Failed to get sensor object");
   }
-  // drop down frame size for higher initial frame rate
-  if (config.pixel_format == PIXFORMAT_JPEG) {
-    s->set_framesize(s, FRAMESIZE_QVGA);
+}
+
+void sendToThingSpeak(int count) {
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    String url = String(server) + "?api_key=" + apiKey + "&field1=" + String(count);
+    http.begin(url);
+    int httpResponseCode = http.GET();
+    if (httpResponseCode > 0) {
+      Serial.println("ThingSpeak Response: " + String(httpResponseCode));
+    } else {
+      Serial.println("Error sending data to ThingSpeak");
+    }
+    http.end();
   }
+}
 
-#if defined(CAMERA_MODEL_M5STACK_WIDE) || defined(CAMERA_MODEL_M5STACK_ESP32CAM)
-  s->set_vflip(s, 1);
-  s->set_hmirror(s, 1);
-#endif
+float measureDistance() {
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(2);
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+  long duration = pulseIn(ECHO_PIN, HIGH);
+  return (duration * 0.034 / 2);
+}
 
-#if defined(CAMERA_MODEL_ESP32S3_EYE)
-  s->set_vflip(s, 1);
-#endif
+void checkDistance() {
+  float distance = measureDistance();
+  if (distance < 10.0) {
+    objectCount++;
+    Serial.println("Object detected! Count: " + String(objectCount));
+    if (millis() - lastSendTime > 15000) { // Send data every 15 seconds
+      sendToThingSpeak(objectCount);
+      lastSendTime = millis();
+    }
+  }
+}
 
-// Setup LED FLash if LED pin is defined in camera_pins.h
-#if defined(LED_GPIO_NUM)
-  setupLedFlash(LED_GPIO_NUM);
-#endif
+void liveCam(WiFiClient &client) {
+  camera_fb_t * fb = esp_camera_fb_get();
+  if (!fb) {
+    Serial.println("Frame buffer could not be acquired");
+    return;
+  }
+  client.print("--frame\n");
+  client.print("Content-Type: image/jpeg\n\n");
+  client.flush();
+  client.write(fb->buf, fb->len);
+  client.flush();
+  client.print("\n");
+  esp_camera_fb_return(fb);
+}
+
+void http_resp() {
+  WiFiClient client = httpServer.available();
+  if (client.connected()) {
+    String req = "";
+    while (client.available()) {
+      req += (char)client.read();
+    }
+    Serial.println("request " + req);
+    int addr_start = req.indexOf("GET") + strlen("GET");
+    int addr_end = req.indexOf("HTTP", addr_start);
+    if (addr_start == -1 || addr_end == -1) {
+      Serial.println("Invalid request " + req);
+      return;
+    }
+    req = req.substring(addr_start, addr_end);
+    req.trim();
+    Serial.println("Request: " + req);
+    client.flush();
+
+    String s;
+    if (req == "/") {
+      s = "HTTP/1.1 200 OK\n";
+      s += "Content-Type: text/html\n\n";
+      s += index_html;
+      s += "\n";
+      client.print(s);
+      client.stop();
+    }
+    else if (req == "/video") {
+      live_client = client;
+      live_client.print("HTTP/1.1 200 OK\n");
+      live_client.print("Content-Type: multipart/x-mixed-replace; boundary=frame\n\n");
+      live_client.flush();
+    }
+    else if (req == "/left") {
+      servoPos = max(0, servoPos - 10);
+      myServo.write(servoPos);
+      client.print("HTTP/1.1 200 OK\n\n");
+      client.stop();
+    }
+    else if (req == "/right") {
+      servoPos = min(180, servoPos + 10);
+      myServo.write(servoPos);
+      client.print("HTTP/1.1 200 OK\n\n");
+      client.stop();
+    }
+    else {
+      s = "HTTP/1.1 404 Not Found\n\n";
+      client.print(s);
+      client.stop();
+    }
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
 
   WiFi.begin(ssid, password);
-  WiFi.setSleep(false);
-
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
   }
-  Serial.println("");
-  Serial.println("WiFi connected");
+  Serial.println("WiFi Connected. IP: " + WiFi.localIP().toString());
 
-  startCameraServer();
+  httpServer.begin();
+  configCamera();
 
-  Serial.print("Camera Ready! Use 'http://");
-  Serial.print(WiFi.localIP());
-  Serial.println("' to connect");
+  myServo.attach(14); 
+  myServo.write(servoPos); 
 }
 
 void loop() {
-  // Do nothing. Everything is done in another task by the web server
-  delay(10000);
+  checkDistance();
+  http_resp();
+  if (live_client.connected()) {
+    liveCam(live_client);
+  }
 }
