@@ -22,6 +22,9 @@ const int redPin = A0;    // Connect to the red pin of the RGB LED
 const int greenPin = A1;  // Connect to the green pin of the RGB LED
 const int bluePin = A3;   // Connect to the blue pin of the RGB LED
 
+// Buzzer setup
+const int buzzerPin = A3; // Using pin 1 for the buzzer (CAUTION: avoid Serial conflicts)
+
 // List of authorized UIDs
 const String authorizedUIDs[] = {
   "7382772A", // Replace with your first RFID UID
@@ -49,8 +52,8 @@ Keypad keypad = Keypad( makeKeymap(keys), pin_rows, pin_columns, ROW_NUM, COLUMN
 
 void setup() {
   // Initialize Serial Monitor
-  Serial.begin(9600);
-  
+  Serial.begin(9600); // CAUTION: Using pin 1 for the buzzer may interfere with this
+
   // Initialize RFID
   SPI.begin();
   rfid.PCD_Init();
@@ -65,13 +68,17 @@ void setup() {
 
   // Initialize Servo
   doorServo.attach(servoPin);
-  doorServo.write(90); // Start with door locked (0 degrees)
+  doorServo.write(180); // Start with door locked (0 degrees)
 
   // Initialize RGB LED pins
   pinMode(redPin, OUTPUT);
   pinMode(greenPin, OUTPUT);
   pinMode(bluePin, OUTPUT);
   turnOffRGB(); // Turn off RGB LED initially
+
+  // Initialize Buzzer
+  pinMode(buzzerPin, OUTPUT);
+  noTone(buzzerPin); // Ensure the buzzer is off initially
 }
 
 void loop() {
@@ -93,6 +100,7 @@ void loop() {
       lcd.setCursor(0, 1);
       lcd.print("Access Denied!");
       setRGBColor(255, 0, 0); // Red for access denied
+      ringSiren(); // Ring the buzzer with siren sound
       delay(3000);
     }
     turnOffRGB(); // Turn off RGB LED after indicating status
@@ -104,15 +112,8 @@ void loop() {
   // Check for PIN input
   char key = keypad.getKey();
   if (key) {
-    Serial.print("Key pressed: ");
-    Serial.println(key);  // Print the key pressed to the Serial Monitor
-
     if (key == '#') {
-      // Trim and compare the entered PIN with the correct PIN
       enteredPIN.trim(); // Remove any extra spaces or non-numeric characters
-      Serial.print("Entered PIN (trimmed): ");
-      Serial.println(enteredPIN);  // Print the entered PIN to Serial Monitor for debugging
-
       if (enteredPIN == correctPIN) {
         lcd.clear();
         lcd.print("Pin Correct!");
@@ -122,6 +123,7 @@ void loop() {
         lcd.clear();
         lcd.print("Incorrect PIN!");
         setRGBColor(255, 0, 0); // Red for access denied
+        ringSiren(); // Ring the buzzer with siren sound
         delay(2000);
       }
       turnOffRGB(); // Turn off RGB LED after indicating status
@@ -136,13 +138,10 @@ void loop() {
       enteredPIN += key; // Add digit to entered PIN
       lcd.clear();
       lcd.print("Enter Pin: ");
-      
-      // Display asterisks for entered PIN
       String displayPIN = "";
       for (int i = 0; i < enteredPIN.length(); i++) {
         displayPIN += "*";
       }
-      
       lcd.setCursor(0, 1);
       lcd.print(displayPIN); // Show entered PIN as asterisks
     }
@@ -175,7 +174,7 @@ void unlockDoor() {
   lcd.print("Door Unlocked");
   doorServo.write(0); // Unlock door (90 degrees)
   delay(5000);         // Wait 5 seconds
-  doorServo.write(90);  // Lock door again (0 degrees)
+  doorServo.write(180);  // Lock door again (0 degrees)
   lcd.clear();
   lcd.print("Door Locked");
 }
@@ -190,4 +189,19 @@ void setRGBColor(int red, int green, int blue) {
 // Function to turn off RGB LED
 void turnOffRGB() {
   setRGBColor(0, 0, 0);
+}
+
+// Function to simulate a siren sound
+void ringSiren() {
+  for (int i = 0; i < 3; i++) { // Loop for 3 siren cycles
+    for (int freq = 500; freq <= 1500; freq += 10) { // Increase frequency
+      tone(buzzerPin, freq);
+      delay(10);
+    }
+    for (int freq = 1500; freq >= 500; freq -= 10) { // Decrease frequency
+      tone(buzzerPin, freq);
+      delay(10);
+    }
+  }
+  noTone(buzzerPin); // Turn off the buzzer after the siren
 }
